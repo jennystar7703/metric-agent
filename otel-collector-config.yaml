@@ -1,0 +1,24 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+exporters:
+  otlphttp:
+    metrics_endpoint: "http://translator:5001/translate"
+    encoding: "json"
+    compression: "none"
+
+  debug:
+    verbosity: detailed 
+
+processors:
+  batch:
+
+service:
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlphttp, debug] # Use 'debug' here, not 'logging'

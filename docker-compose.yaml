@@ -1,0 +1,43 @@
+services:
+  ndp-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: lucyzeta/ndp-agent:latest
+    restart: always
+    environment:
+      - NDP_OWNER_ID=node-provider-lucy
+    privileged: true
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./agent-data:/app/
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, utility, compute]
+    depends_on:
+      - otel-collector
+
+  translator:
+    build: ./translator
+    image: lucyzeta/translator:latest
+    container_name: translator
+    environment:
+      - BACKEND_URL=http://211.176.180.172:8080/api/v1/nodes/telemetry
+    ports:
+      - "5001:5001"
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    container_name: otel-collector
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol-contrib/config.yaml
+    ports:
+      - "4317:4317"
+    depends_on:
+      - translator
