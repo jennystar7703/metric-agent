@@ -5,7 +5,6 @@ from flask import Flask, request, logging
 
 app = Flask(__name__)
 
-# Logger configuration (no change)
 if not app.debug:
     import logging
     from logging import StreamHandler
@@ -16,7 +15,6 @@ if not app.debug:
 
 BACKEND_URL = os.environ.get("BACKEND_URL")
 
-# Helper function (no change)
 def _find_attribute(attributes, key):
     for attr in attributes:
         if attr.get('key') == key:
@@ -29,20 +27,14 @@ def translate_telemetry():
         otel_data = request.json
         simple_json = {}
         
-        # --- Lists for averaging GPU metrics ---
         gpu_usages = []
         gpu_temps = []
         gpu_vrams = []
         ssd_healths = []
 
-        # <<< CHANGE: Variables for overall SSD health >>>
-        ssd_found = False
-        all_ssds_passed = True # Assume all are healthy until a failure is found
-
         resource_metrics = otel_data.get('resourceMetrics', [])
         if not resource_metrics: raise ValueError("Payload missing 'resourceMetrics'")
 
-        # Node ID Extraction (no change)
         resource = resource_metrics[0].get('resource', {})
         for attr in resource.get('attributes', []):
             if attr.get('key') == 'host.id':
@@ -61,15 +53,16 @@ def translate_telemetry():
                 value = data_point.get('asInt') or data_point.get('asDouble')
                 if value is None: continue
 
-                # System-wide metrics (no change)
                 if metric_name == 'system.cpu.utilization':
                     simple_json['cpu_usage_percent'] = f"{value:.1f}"
                 elif metric_name == 'system.memory.utilization':
                     simple_json['mem_usage_percent'] = f"{value:.1f}"
                 elif metric_name == 'system.storage.used_gb':
                     simple_json['used_storage_gb'] = str(int(value))
-
-                # GPU metric collection (no change)
+                # --- NEW ---: Handle the new hard disk percentage metric
+                elif metric_name == 'system.harddisk.used_percent':
+                    simple_json['harddisk_used_percent'] = f"{value:.1f}"
+                # --- END NEW ---
                 elif metric_name == 'system.gpu.utilization':
                     gpu_usages.append(value)
                 elif metric_name == 'system.gpu.temperature':
@@ -79,18 +72,6 @@ def translate_telemetry():
                 elif metric_name == 'system.ssd.health_percent':
                     ssd_healths.append(value)
 
-                """
-                elif metric_name == 'system.ssd.health_passed':
-                    ssd_found = True
-                    # If any drive fails (value is 0), the overall status is failure.
-                    if int(value) == 0:
-                        all_ssds_passed = False
-                        """
-
-        
-        # --- Final Averaging and Formatting ---
-
-        # GPU averages (no change)
         if gpu_usages:
             avg_usage = sum(gpu_usages) / len(gpu_usages)
             simple_json['gpu_usage_percent'] = f"{avg_usage:.1f}"
@@ -100,11 +81,6 @@ def translate_telemetry():
         if gpu_vrams:
             avg_vram = sum(gpu_vrams) / len(gpu_vrams)
             simple_json['gpu_vram_percent'] = f"{avg_vram:.1f}"
-        """
-        # <<< NEW: Add the single, overall SSD health status to the JSON >>>
-        if ssd_found:
-            simple_json['ssd_health_percent'] = "passed" if all_ssds_passed else "failed"
-        """
         if ssd_healths:
             avg_health = sum(ssd_healths) / len(ssd_healths)
             simple_json['ssd_health_percent'] = f"{avg_health:.1f}"

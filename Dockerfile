@@ -1,41 +1,46 @@
-# Stage 1: The Builder (This stage is correct and remains the same)
-FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 AS builder
+# =================================================================
+# BUILD STAGE FOR GPU
+# =================================================================
+FROM nvidia/cuda:12.2.2-devel-ubuntu22.04 AS gpu_builder
 
 RUN apt-get update && apt-get install -y wget && \
-    wget https://golang.org/dl/go1.22.5.linux-amd64.tar.gz && \
+    wget https://golang.org/dl/go1.23.7.linux-amd64.tar.gz && \
     rm -rf /usr/local/go && \
-    tar -C /usr/local -xzf go1.22.5.linux-amd64.tar.gz && \
-    rm go1.22.5.linux-amd64.tar.gz
-
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    wget \
-    smartmontools \
-    && rm -rf /var/lib/apt/lists/*
-
+    tar -C /usr/local -xzf go1.23.7.linux-amd64.tar.gz && \
+    rm go1.23.7.linux-amd64.tar.gz
 ENV PATH="/usr/local/go/bin:${PATH}"
 
+RUN apt-get update && apt-get install -y build-essential smartmontools && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY ./go-agent/ .
+RUN CGO_ENABLED=1 GOOS=linux go build -tags=gpu -o /unified-agent-gpu .
 
-RUN CGO_ENABLED=1 GOOS=linux go build -o /unified-agent .
+
+# =================================================================
+# BUILD STAGE FOR CPU
+# =================================================================
+FROM golang:1.23.7 AS cpu_builder
+
+RUN apt-get update && apt-get install -y build-essential smartmontools && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY ./go-agent/ .
+RUN CGO_ENABLED=1 GOOS=linux go build -o /unified-agent-cpu .
 
 
-# --- Stage 2: The Final, Compatible Runtime Image ---
-
-# --- THIS IS THE FIX ---
-# We now use a slim ubuntu image which is compatible with the glibc
-# library used in the builder stage.
-FROM ubuntu:22.04
-
+# =================================================================
+# FINAL IMAGE FOR GPU
+# =================================================================
+FROM nvidia/cuda:12.2.2-base-ubuntu22.04 AS gpu
 RUN apt-get update && apt-get install -y smartmontools && rm -rf /var/lib/apt/lists/*
-
-
-# Copy the compiled binary from the absolute path in the builder
-COPY --from=builder /unified-agent /unified-agent
-
-# Add execute permissions
+COPY --from=gpu_builder /unified-agent-gpu /unified-agent
 RUN chmod +x /unified-agent
+CMD ["/unified-agent"]
 
-# Run the command using the absolute path
+# =================================================================
+# FINAL IMAGE FOR CPU
+# =================================================================
+FROM ubuntu:22.04 AS cpu
+RUN apt-get update && apt-get install -y smartmontools && rm -rf /var/lib/apt/lists/*
+COPY --from=cpu_builder /unified-agent-cpu /unified-agent
+RUN chmod +x /unified-agent
 CMD ["/unified-agent"]

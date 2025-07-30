@@ -1,0 +1,19 @@
+services:
+  ndp-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      # FIX 1: Explicitly target the 'gpu' stage for the build.
+      target: gpu
+
+    # Override the image tag for the GPU version.
+    image: lucyzeta/ndp-agent:gpu
+
+    # Add the deploy key to request GPU resources from Docker.
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, utility, compute]

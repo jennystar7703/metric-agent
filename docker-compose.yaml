@@ -3,22 +3,22 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: lucyzeta/ndp-agent:latest
+      # Target the 'cpu' stage in your Dockerfile
+      target: cpu
+    # Tag this image as the CPU version
+    image: lucyzeta/ndp-agent:cpu
     restart: always
     environment:
       - NDP_OWNER_ID=node-provider-lucy
+      - NDP_NODE_NAME=BC01-Miner
     privileged: true
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
+      # These volumes are needed for BOTH CPU and GPU versions
       - ./agent-data:/app/
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu, utility, compute]
+      - /mnt:/mnt:ro
+      - /proc/mounts:/host/mounts:ro
     depends_on:
       - otel-collector
 

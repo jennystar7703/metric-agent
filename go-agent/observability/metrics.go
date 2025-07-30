@@ -1,3 +1,5 @@
+// In go-agent/observability/metrics.go
+
 package observability
 
 import (
@@ -7,7 +9,7 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/NVIDIA/go-nvml/pkg/nvml"
+	// REMOVED: "github.com/NVIDIA/go-nvml/pkg/nvml"
 	"github.com/shirou/gopsutil/v4/cpu"
 	"github.com/shirou/gopsutil/v4/disk"
 	"github.com/shirou/gopsutil/v4/mem"
@@ -45,12 +47,10 @@ func registerOtelMetrics(mp *sdkmetric.MeterProvider) error {
 	memGauge, _ := meter.Float64ObservableGauge("system.memory.utilization", metric.WithDescription("Memory Utilization Percentage"))
 	gpuGauge, _ := meter.Float64ObservableGauge("system.gpu.utilization", metric.WithDescription("GPU Utilization Percentage"))
 	gpuTempGauge, _ := meter.Float64ObservableGauge("system.gpu.temperature", metric.WithDescription("GPU Temperature in Celsius"))
-	// --- NEW ---: Gauge for VRAM percentage
 	gpuVRAMGauge, _ := meter.Float64ObservableGauge("system.gpu.vram.utilization", metric.WithDescription("GPU VRAM Utilization Percentage"))
-	storageUsedGauge, _ := meter.Int64ObservableGauge("system.storage.used_gb", metric.WithDescription("Used Storage in GB"))
-	//ssdHealthGauge, _ := meter.Int64ObservableGauge("system.ssd.health_passed", metric.WithDescription("SSD SMART health check status (1 = passed, 0 = failed)"))
+	storageUsedGauge, _ := meter.Int64ObservableGauge("system.storage.used_gb", metric.WithDescription("Used Storage on root partition in GB"))
 	ssdHealthGauge, _ := meter.Float64ObservableGauge("system.ssd.health_percent", metric.WithDescription("SSD Health Percentage (100 - Percentage Used)"))
-
+	harddiskUsedPercentGauge, _ := meter.Float64ObservableGauge("system.harddisk.used_percent", metric.WithDescription("Total used hard disk space percentage across all mounts"))
 
 	_, err := meter.RegisterCallback(func(ctx context.Context, o metric.Observer) error {
 		// CPU Usage
@@ -62,78 +62,49 @@ func registerOtelMetrics(mp *sdkmetric.MeterProvider) error {
 		if vmStat, err := mem.VirtualMemory(); err == nil {
 			o.ObserveFloat64(memGauge, vmStat.UsedPercent)
 		}
-		
-		// Storage Used
+
+		// Storage Used (on root partition)
 		if usage, err := disk.Usage("/"); err == nil {
 			o.ObserveInt64(storageUsedGauge, int64(usage.Used/(1024*1024*1024)))
 		}
 
-		// GPU Metrics (per GPU)
-		if count, ret := nvml.DeviceGetCount(); ret == nvml.SUCCESS {
-			for i := 0; i < int(count); i++ {
-				dev, ret := nvml.DeviceGetHandleByIndex(i)
-				if ret != nvml.SUCCESS {
-					continue // Skip to next device on error
-				}
-
-				gpuAttr := metric.WithAttributes(attribute.Int("gpu.index", i))
-
-				// GPU Core Utilization
-				if util, ret := dev.GetUtilizationRates(); ret == nvml.SUCCESS {
-					o.ObserveFloat64(gpuGauge, float64(util.Gpu), gpuAttr)
-				}
-
-				// GPU Temperature
-				if temp, ret := dev.GetTemperature(nvml.TEMPERATURE_GPU); ret == nvml.SUCCESS {
-					o.ObserveFloat64(gpuTempGauge, float64(temp), gpuAttr)
-				}
-
-				// --- NEW ---: VRAM Utilization Percentage
-				if memInfo, ret := dev.GetMemoryInfo(); ret == nvml.SUCCESS {
-					if memInfo.Total > 0 { // Avoid division by zero
-						vramPercent := (float64(memInfo.Used) / float64(memInfo.Total)) * 100.0
-						o.ObserveFloat64(gpuVRAMGauge, vramPercent, gpuAttr)
+		// Calculate and observe total hard disk usage percentage
+		var totalDiskSpace uint64 = 0
+		var totalUsedSpace uint64 = 0
+		if partitions, err := disk.Partitions(true); err == nil {
+			for _, p := range partitions {
+				// A simple whitelist to avoid temporary/system filesystems
+				if strings.HasPrefix(p.Fstype, "ext") || strings.HasPrefix(p.Fstype, "xfs") || strings.HasPrefix(p.Fstype, "btrfs") || strings.HasPrefix(p.Fstype, "nfs") {
+					if usage, err := disk.Usage(p.Mountpoint); err == nil {
+						totalDiskSpace += usage.Total
+						totalUsedSpace += usage.Used
 					}
 				}
 			}
 		}
-		
-		/*
+		if totalDiskSpace > 0 {
+			usedPercent := (float64(totalUsedSpace) / float64(totalDiskSpace)) * 100.0
+			o.ObserveFloat64(harddiskUsedPercentGauge, usedPercent)
+		} else {
+			o.ObserveFloat64(harddiskUsedPercentGauge, 0.0)
+		}
+
+		// --- THIS IS THE KEY CHANGE ---
+		// This single function call will either run the real GPU code or the empty
+		// stub, depending on which file was compiled.
+		observeGpuMetrics(o, gpuGauge, gpuTempGauge, gpuVRAMGauge)
+		// --- END KEY CHANGE ---
+
 		// SSD Health (per drive)
 		if devices, err := discoverBlockDevices(); err == nil {
 			for _, devicePath := range devices {
-				deviceAttr := metric.WithAttributes(attribute.String("device.path", devicePath))
-				passed := 0 // Assume failed unless proven otherwise
-				cmd := exec.Command("smartctl", "-H", "-j", devicePath)
-				output, err := cmd.Output()
-
-				if err == nil {
-					var smartctlData struct {
-						SmartStatus struct {
-							Passed bool `json:"passed"`
-						} `json:"smart_status"`
-					}
-					if json.Unmarshal(output, &smartctlData) == nil && smartctlData.SmartStatus.Passed {
-						passed = 1
-					}
+				if !strings.HasPrefix(devicePath, "/dev/nvme") {
+					continue
 				}
-				o.ObserveInt64(ssdHealthGauge, int64(passed), deviceAttr)
-			}
-		} */
-		if devices, err := discoverBlockDevices(); err == nil {
-			for _, devicePath := range devices {
-                // Only check NVMe devices for percentage used attribute
-                if !strings.HasPrefix(devicePath, "/dev/nvme") {
-                    continue
-                }
-
 				deviceAttr := metric.WithAttributes(attribute.String("device.path", devicePath))
-				healthPercentage := 0.0 // Default to 0% health on error
-
-                // Use -A to get all attributes
+				healthPercentage := 0.0
 				cmd := exec.Command("smartctl", "-A", "-j", devicePath)
 				output, err := cmd.Output()
-
 				if err == nil {
 					var smartctlData struct {
 						NvmeSmartHealthLog struct {
@@ -141,18 +112,14 @@ func registerOtelMetrics(mp *sdkmetric.MeterProvider) error {
 						} `json:"nvme_smart_health_information_log"`
 					}
 					if json.Unmarshal(output, &smartctlData) == nil {
-                        // Health is defined as 100% minus the percentage used
 						healthPercentage = 100.0 - float64(smartctlData.NvmeSmartHealthLog.PercentageUsed)
 					}
 				}
 				o.ObserveFloat64(ssdHealthGauge, healthPercentage, deviceAttr)
 			}
 		}
-		return nil 
-
+		return nil
 	},
-
-		// --- UPDATE ---: Add the new gauge to the callback registration
 		cpuGauge,
 		memGauge,
 		gpuGauge,
@@ -160,6 +127,7 @@ func registerOtelMetrics(mp *sdkmetric.MeterProvider) error {
 		gpuVRAMGauge,
 		storageUsedGauge,
 		ssdHealthGauge,
+		harddiskUsedPercentGauge,
 	)
 	return err
 }
